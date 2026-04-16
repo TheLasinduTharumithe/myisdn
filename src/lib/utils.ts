@@ -81,11 +81,11 @@ export function getStatusTone(status: string) {
     return "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200";
   }
 
-  if (["approved", "processing", "picked_up", "in_transit", "nearby"].includes(status)) {
+  if (["approved", "packed", "processing", "shipped", "picked_up", "in_transit", "nearby"].includes(status)) {
     return "bg-sky-50 text-sky-700 ring-1 ring-sky-200";
   }
 
-  if (["pending", "assigned"].includes(status)) {
+  if (["pending", "placed", "awaiting_confirmation", "assigned"].includes(status)) {
     return "bg-amber-50 text-amber-700 ring-1 ring-amber-200";
   }
 

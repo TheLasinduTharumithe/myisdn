@@ -3,28 +3,57 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { MessageSquareText, PackageCheck, ShoppingBag } from "lucide-react";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import DashboardShell from "@/components/DashboardShell";
 import EmptyState from "@/components/EmptyState";
+import LoadingState from "@/components/LoadingState";
 import OrderTable from "@/components/OrderTable";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { useAuth } from "@/lib/auth";
-import { getOrdersByCustomer } from "@/services/order.service";
+import {
+  cancelOrder,
+  canCustomerCancelOrder,
+  getOrderCancellationMessage,
+  getOrdersByCustomer,
+} from "@/services/order.service";
 import { Order } from "@/types";
 
 export default function CustomerOrdersPage() {
   const { user } = useAuth();
   const [orders, setOrders] = useState<Order[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [cancelReason, setCancelReason] = useState("");
+  const [cancellingId, setCancellingId] = useState("");
+
+  async function refreshOrders() {
+    if (!user) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      setOrders(await getOrdersByCustomer(user.id));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     async function loadOrders() {
       if (!user) {
+        setLoading(false);
         return;
       }
-      setOrders(await getOrdersByCustomer(user.id));
+
+      await refreshOrders();
     }
 
     void loadOrders();
   }, [user]);
+
   const deliveredItems = orders
     .filter((order) => order.status === "delivered")
     .flatMap((order) =>
@@ -36,6 +65,27 @@ export default function CustomerOrdersPage() {
         image64: item.image64,
       })),
     );
+
+  async function handleConfirmCancellation() {
+    if (!selectedOrder || !user) {
+      return;
+    }
+
+    try {
+      setCancellingId(selectedOrder.id);
+      setError("");
+      setMessage("");
+      await cancelOrder(selectedOrder.id, user.id, cancelReason);
+      setMessage(`Order ${selectedOrder.id} was cancelled successfully.`);
+      setSelectedOrder(null);
+      setCancelReason("");
+      await refreshOrders();
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : "Unable to cancel order.");
+    } finally {
+      setCancellingId("");
+    }
+  }
 
   return (
     <ProtectedRoute allowedRoles={["customer"]}>
@@ -71,11 +121,45 @@ export default function CustomerOrdersPage() {
           </div>
         </section>
 
-        {orders.length === 0 ? (
+        {message ? <p className="notice-success">{message}</p> : null}
+        {error ? <p className="notice-error">{error}</p> : null}
+
+        {loading ? (
+          <LoadingState label="Loading your orders..." />
+        ) : orders.length === 0 ? (
           <EmptyState title="No orders yet" description="Your orders will appear here after you complete checkout." />
         ) : (
           <>
-            <OrderTable orders={orders} detailsBasePath="/customer/orders" trackingBasePath="/customer/tracking" />
+            <OrderTable
+              orders={orders}
+              detailsBasePath="/customer/orders"
+              trackingBasePath="/customer/tracking"
+              actionRenderer={(order) => {
+                const canCancel = canCustomerCancelOrder(order, user?.id);
+                const cancellationMessage = getOrderCancellationMessage(order, user?.id);
+                const isCancelling = cancellingId === order.id;
+
+                return (
+                  <>
+                    <button
+                      type="button"
+                      disabled={!canCancel || isCancelling}
+                      title={canCancel ? "Cancel this order" : cancellationMessage}
+                      onClick={() => {
+                        setSelectedOrder(order);
+                        setCancelReason("");
+                      }}
+                      className="btn-danger w-full justify-center px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+                    >
+                      {isCancelling ? "Cancelling..." : "Cancel Order"}
+                    </button>
+                    {!canCancel ? (
+                      <p className="w-full text-xs text-rose-600">{cancellationMessage}</p>
+                    ) : null}
+                  </>
+                );
+              }}
+            />
 
             {deliveredItems.length > 0 ? (
               <section className="surface-card rounded-[2rem] p-5 sm:p-6">
@@ -115,6 +199,42 @@ export default function CustomerOrdersPage() {
             ) : null}
           </>
         )}
+
+        <ConfirmDialog
+          open={Boolean(selectedOrder)}
+          title="Are you sure you want to cancel this order?"
+          description="You can cancel only early-stage orders. This action will update the order immediately and cannot be undone from the customer side."
+          confirmLabel="Yes, Cancel Order"
+          cancelLabel="Keep Order"
+          confirming={Boolean(selectedOrder) && cancellingId === selectedOrder?.id}
+          onConfirm={() => void handleConfirmCancellation()}
+          onCancel={() => {
+            if (cancellingId) {
+              return;
+            }
+
+            setSelectedOrder(null);
+            setCancelReason("");
+          }}
+        >
+          {selectedOrder ? (
+            <div className="rounded-[1.5rem] border border-rose-100 bg-rose-50/70 p-4">
+              <p className="text-sm font-semibold text-slate-900">Order ID</p>
+              <p className="mt-1 break-all text-sm text-slate-600">{selectedOrder.id}</p>
+
+              <label className="mt-4 block">
+                <span className="field-label">Reason for cancellation (optional)</span>
+                <textarea
+                  value={cancelReason}
+                  onChange={(event) => setCancelReason(event.target.value)}
+                  className="input-field min-h-[6rem] w-full resize-none"
+                  placeholder="Add a short reason if needed"
+                  maxLength={240}
+                />
+              </label>
+            </div>
+          ) : null}
+        </ConfirmDialog>
       </DashboardShell>
     </ProtectedRoute>
   );

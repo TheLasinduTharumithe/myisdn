@@ -4,10 +4,11 @@ import { clearCart } from "@/services/cart.service";
 import { createDelivery, getDeliveryByOrderId, updateDeliveryStatus } from "@/services/delivery.service";
 import {
   reduceInventoryForOrder,
+  restoreInventoryForCancelledOrder,
   restoreInventoryReduction,
   validateInventoryForOrder,
 } from "@/services/inventory.service";
-import { createPayment } from "@/services/payment.service";
+import { createPayment, getPaymentByOrder, markPaymentStatus } from "@/services/payment.service";
 import { getProductById } from "@/services/product.service";
 import { canUseFirestore, listDocs, setDocById } from "@/services/service-helpers";
 import { Order, OrderItem, OrderStatus, PlaceOrderInput } from "@/types";
@@ -54,21 +55,27 @@ function normalizeOrderStatus(value: unknown): OrderStatus {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
 
   switch (normalized) {
-    case "placed":
     case "new":
     case "pending":
       return "pending";
+    case "placed":
+      return "placed";
+    case "awaiting_confirmation":
+    case "awaiting confirmation":
+      return "awaiting_confirmation";
     case "approved":
     case "confirmed":
     case "accepted":
       return "approved";
-    case "processing":
     case "packed":
+      return "packed";
+    case "processing":
     case "packing":
       return "processing";
+    case "shipped":
+      return "shipped";
     case "out_for_delivery":
     case "out for delivery":
-    case "shipped":
     case "dispatched":
     case "in_delivery":
       return "out_for_delivery";
@@ -203,8 +210,76 @@ function normalizeOrder(
         ? value.paymentStatus
         : undefined,
     createdAt: normalizeDate(value.createdAt ?? value.orderDate ?? value.date ?? value.timestamp),
+    cancelledAt: normalizeDate(value.cancelledAt),
+    cancelledBy: typeof value.cancelledBy === "string" ? value.cancelledBy : "",
+    cancelReason: typeof value.cancelReason === "string" ? value.cancelReason : "",
+    inventoryReducedAt: normalizeDate(value.inventoryReducedAt),
+    inventoryRestoredAt: normalizeDate(value.inventoryRestoredAt),
     updatedAt: normalizeDate(value.updatedAt),
   } satisfies Order;
+}
+
+const CANCELLABLE_ORDER_STATUSES: OrderStatus[] = [
+  "pending",
+  "placed",
+  "awaiting_confirmation",
+];
+
+export function canCancelOrder(status: OrderStatus) {
+  return CANCELLABLE_ORDER_STATUSES.includes(status);
+}
+
+export function getOrderCancellationMessage(order: Pick<Order, "customerId" | "status">, customerId?: string) {
+  if (!customerId) {
+    return "You must be signed in to cancel an order.";
+  }
+
+  if (order.customerId !== customerId) {
+    return "You can cancel only your own orders.";
+  }
+
+  if (order.status === "cancelled") {
+    return "This order has already been cancelled.";
+  }
+
+  if (!canCancelOrder(order.status)) {
+    return "Cancellation is available only before RDC processing starts.";
+  }
+
+  return "";
+}
+
+export function canCustomerCancelOrder(order: Pick<Order, "customerId" | "status">, customerId?: string) {
+  return getOrderCancellationMessage(order, customerId) === "";
+}
+
+async function persistOrderUpdate(orders: Order[], updated: Order) {
+  if (canUseFirestore()) {
+    await setDocById(COLLECTION, updated);
+  }
+
+  writeCollection(
+    "orders",
+    orders.map((order) => (order.id === updated.id ? updated : order)),
+  );
+
+  return updated;
+}
+
+async function updateOrderRecord(orderId: string, updates: Partial<Order>) {
+  const orders = await getOrders();
+  const target = orders.find((order) => order.id === orderId);
+  if (!target) {
+    throw new Error("Order not found.");
+  }
+
+  const updated: Order = {
+    ...target,
+    ...updates,
+    updatedAt: new Date().toISOString(),
+  };
+
+  return persistOrderUpdate(orders, updated);
 }
 
 export async function getOrders() {
@@ -330,27 +405,7 @@ export async function placeOrder(input: PlaceOrderInput) {
 }
 
 export async function updateOrderStatus(orderId: string, status: OrderStatus) {
-  const orders = await getOrders();
-  const target = orders.find((order) => order.id === orderId);
-  if (!target) {
-    throw new Error("Order not found.");
-  }
-
-  const updated: Order = {
-    ...target,
-    status,
-    updatedAt: new Date().toISOString(),
-  };
-
-  if (canUseFirestore()) {
-    await setDocById(COLLECTION, updated);
-  }
-
-  writeCollection(
-    "orders",
-    orders.map((order) => (order.id === orderId ? updated : order)),
-  );
-  return updated;
+  return updateOrderRecord(orderId, { status });
 }
 
 export async function manageOrderStatus(orderId: string, status: OrderStatus) {
@@ -420,6 +475,11 @@ export async function approveOrder(orderId: string) {
   try {
     updatedOrder = await updateOrderStatus(orderId, "approved");
     inventorySnapshot = await reduceInventoryForOrder(order.rdcId, order.items);
+    updatedOrder = await updateOrderRecord(orderId, {
+      status: "approved",
+      inventoryReducedAt: new Date().toISOString(),
+      inventoryRestoredAt: undefined,
+    });
     await createDelivery(updatedOrder);
     return updatedOrder;
   } catch (error) {
@@ -428,9 +488,58 @@ export async function approveOrder(orderId: string) {
     }
 
     if (updatedOrder) {
-      await updateOrderStatus(orderId, order.status);
+      await updateOrderRecord(orderId, {
+        status: order.status,
+        inventoryReducedAt: order.inventoryReducedAt,
+        inventoryRestoredAt: order.inventoryRestoredAt,
+      });
     }
 
     throw error;
   }
+}
+
+export async function cancelOrder(orderId: string, customerId: string, cancelReason?: string) {
+  if (!customerId) {
+    throw new Error("You must be signed in to cancel an order.");
+  }
+
+  const order = await getOrderById(orderId);
+  if (!order) {
+    throw new Error("Order not found.");
+  }
+
+  const cancellationMessage = getOrderCancellationMessage(order, customerId);
+  if (cancellationMessage) {
+    throw new Error(cancellationMessage);
+  }
+
+  const restoredInventory = await restoreInventoryForCancelledOrder(order);
+  const now = new Date().toISOString();
+  const trimmedReason = cancelReason?.trim();
+
+  const updatedOrder = await updateOrderRecord(orderId, {
+    status: "cancelled",
+    cancelledAt: now,
+    cancelledBy: customerId,
+    cancelReason: trimmedReason || undefined,
+    inventoryRestoredAt: restoredInventory ? now : order.inventoryRestoredAt,
+  });
+
+  const payment = await getPaymentByOrder(orderId);
+  if (payment?.paymentStatus === "paid") {
+    await markPaymentStatus(orderId, "refunded", payment.method);
+  }
+
+  const delivery = await getDeliveryByOrderId(orderId);
+  if (delivery && delivery.status === "assigned") {
+    await updateDeliveryStatus(
+      delivery.id,
+      "delayed",
+      delivery.currentLocation,
+      delivery.estimatedDelivery,
+    );
+  }
+
+  return updatedOrder;
 }

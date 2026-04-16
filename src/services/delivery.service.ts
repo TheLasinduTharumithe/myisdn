@@ -1,9 +1,9 @@
 import { readCollection, writeCollection } from "@/lib/local-db";
 import { getRdcRouteLocation } from "@/lib/osrm";
 import { createId } from "@/lib/utils";
-import { getAllUsers, getUsersByRole } from "@/services/user.service";
+import { getAllUsers } from "@/services/user.service";
 import { canUseFirestore, listDocs, setDocById } from "@/services/service-helpers";
-import { Delivery, DeliveryStatus, GeoPointLike, Order } from "@/types";
+import { Delivery, DeliveryStatus, GeoPointLike, Order, RdcId } from "@/types";
 
 const COLLECTION = "deliveries";
 
@@ -86,6 +86,16 @@ function normalizeDeliveryStatus(value: unknown): DeliveryStatus {
   }
 }
 
+function normalizeRdcId(value: unknown): RdcId | undefined {
+  return value === "north" ||
+    value === "south" ||
+    value === "east" ||
+    value === "west" ||
+    value === "central"
+    ? value
+    : undefined;
+}
+
 function normalizeDelivery(value: Record<string, unknown>) {
   const rdcFallback =
     value.rdcId === "north" ||
@@ -107,6 +117,7 @@ function normalizeDelivery(value: Record<string, unknown>) {
         : createId("delivery"),
     orderId: typeof value.orderId === "string" ? value.orderId : "",
     customerId: typeof value.customerId === "string" ? value.customerId : "",
+    rdcId: normalizeRdcId(value.rdcId),
     driverId:
       typeof value.driverId === "string" && value.driverId
         ? value.driverId
@@ -165,17 +176,13 @@ export async function createDelivery(order: Order) {
     return existing;
   }
 
-  const logisticsStaff = await getUsersByRole("logistics");
-  const assignedDriverId =
-    logisticsStaff.length === 1
-      ? logisticsStaff[0].id
-      : "unassigned_driver";
   const startLocation = getRdcRouteLocation(order.rdcId) ?? { lat: 6.9271, lng: 79.8612 };
   const delivery: Delivery = {
     id: createId("delivery"),
     orderId: order.id,
     customerId: order.customerId,
-    driverId: assignedDriverId,
+    rdcId: order.rdcId,
+    driverId: "unassigned_driver",
     status: "assigned",
     customerLocation: order.deliveryLocation,
     currentLocation: startLocation,
@@ -252,15 +259,30 @@ export async function getDeliveriesForDriver(driverId: string) {
   const exactMatches = deliveries.filter((delivery) => delivery.driverId === driverId);
 
   const users = await getAllUsers();
+  const usersById = new Map(users.map((user) => [user.id, user]));
+  const currentDriver = usersById.get(driverId);
   const logisticsIds = new Set(users.filter((user) => user.role === "logistics").map((user) => user.id));
   const fallbackDeliveries = deliveries.filter(
-    (delivery) =>
-      delivery.driverId !== driverId &&
-      (
+    (delivery) => {
+      if (delivery.driverId === driverId) {
+        return false;
+      }
+
+      const assignedDriver = delivery.driverId ? usersById.get(delivery.driverId) : undefined;
+      const isClaimableByRdc =
+        delivery.status === "assigned" &&
+        Boolean(currentDriver?.rdcId) &&
+        Boolean(delivery.rdcId) &&
+        delivery.rdcId === currentDriver?.rdcId &&
+        (!assignedDriver || assignedDriver.role !== "logistics" || assignedDriver.rdcId !== currentDriver?.rdcId);
+
+      return (
         delivery.driverId === "unassigned_driver" ||
         !delivery.driverId ||
-        !logisticsIds.has(delivery.driverId)
-      ),
+        !logisticsIds.has(delivery.driverId) ||
+        isClaimableByRdc
+      );
+    },
   );
 
   if (fallbackDeliveries.length > 0) {

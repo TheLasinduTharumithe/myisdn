@@ -46,10 +46,11 @@ export default function RdcOrdersPage() {
                   type="button"
                   onClick={async () => {
                     try {
+                      setMessage("");
                       setError("");
                       await approveOrder(order.id);
-                      setMessage(`Order ${order.id} approved and inventory updated.`);
                       await refresh();
+                      setMessage(`Order ${order.id} approved and inventory updated.`);
                     } catch (err) {
                       setError(err instanceof Error ? err.message : "Unable to approve order.");
                     }
@@ -64,10 +65,11 @@ export default function RdcOrdersPage() {
                   type="button"
                   onClick={async () => {
                     try {
+                      setMessage("");
                       setError("");
                       await updateOrderStatus(order.id, "processing");
-                      setMessage(`Order ${order.id} moved to processing.`);
                       await refresh();
+                      setMessage(`Order ${order.id} moved to processing.`);
                     } catch (err) {
                       setError(err instanceof Error ? err.message : "Unable to update order status.");
                     }

@@ -2,7 +2,7 @@ import { readCollection, writeCollection } from "@/lib/local-db";
 import { createId } from "@/lib/utils";
 import { getProductById, getProducts, updateProductStock } from "@/services/product.service";
 import { canUseFirestore, listDocs, setDocById } from "@/services/service-helpers";
-import { Inventory, OrderItem, Product, RdcId, StockTransfer } from "@/types";
+import { Inventory, Order, OrderItem, Product, RdcId, StockTransfer } from "@/types";
 
 const COLLECTION = "inventory";
 
@@ -181,6 +181,68 @@ export async function reduceInventoryForOrder(rdcId: RdcId, items: OrderItem[]) 
     await restoreInventoryReduction(snapshot);
     throw error;
   }
+}
+
+export async function restoreInventoryForCancelledOrder(order: Pick<Order, "rdcId" | "items" | "inventoryReducedAt" | "inventoryRestoredAt">) {
+  if (!order.inventoryReducedAt || order.inventoryRestoredAt) {
+    return false;
+  }
+
+  const resolvedItems = await resolveOrderItemsForInventory(order.items);
+  const uniqueProductIds = [...new Set(resolvedItems.map((item) => item.productId).filter(Boolean))];
+
+  if (uniqueProductIds.length === 0) {
+    return false;
+  }
+
+  await Promise.all(uniqueProductIds.map((productId) => ensureInventoryRecord(productId, order.rdcId)));
+
+  const inventory = await getInventory();
+  const now = new Date().toISOString();
+  const updatedInventory = inventory.map((record) => {
+    const match = resolvedItems.find(
+      (item) => item.productId === record.productId && record.rdcId === order.rdcId,
+    );
+
+    if (!match) {
+      return record;
+    }
+
+    return {
+      ...record,
+      quantity: record.quantity + match.quantity,
+      updatedAt: now,
+    };
+  });
+
+  writeCollection("inventory", updatedInventory);
+
+  if (canUseFirestore()) {
+    await Promise.all(
+      updatedInventory
+        .filter(
+          (record) =>
+            record.rdcId === order.rdcId &&
+            resolvedItems.some((item) => item.productId === record.productId),
+        )
+        .map((record) => setDocById(COLLECTION, record)),
+    );
+  }
+
+  await Promise.all(
+    uniqueProductIds.map(async (productId) => {
+      const product = await getProductById(productId);
+      const restoredQuantity = resolvedItems
+        .filter((item) => item.productId === productId)
+        .reduce((sum, item) => sum + item.quantity, 0);
+
+      if (product && restoredQuantity > 0) {
+        await updateProductStock(product.id, product.stock + restoredQuantity);
+      }
+    }),
+  );
+
+  return true;
 }
 
 export async function transferStock(productId: string, fromRdcId: RdcId, toRdcId: RdcId, quantity: number) {

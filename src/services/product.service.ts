@@ -2,22 +2,17 @@ import {
   collection,
   deleteDoc,
   doc,
-  getDoc,
   getDocs,
   query,
-  setDoc,
-  updateDoc,
   where,
 } from "firebase/firestore";
+import { readCollection, writeCollection } from "@/lib/local-db";
 import { getFirebaseDb } from "@/lib/firebase";
 import { createId } from "@/lib/utils";
+import { canUseFirestore, getDocById, listDocs, setDocById } from "@/services/service-helpers";
 import { Product, ProductFilterInput, ProductFormInput } from "@/types";
 
 const COLLECTION = "products";
-
-function getProductsCollection() {
-  return collection(getFirebaseDb(), COLLECTION);
-}
 
 function sanitizeProductPayload(input: Partial<ProductFormInput>) {
   return {
@@ -74,14 +69,24 @@ function normalizeProduct(id: string, value: Record<string, unknown>) {
 }
 
 export async function getAllProducts() {
-  const snapshot = await getDocs(query(getProductsCollection()));
-  return snapshot.docs
-    .map((documentSnapshot) =>
-      normalizeProduct(documentSnapshot.id, documentSnapshot.data() as Record<string, unknown>),
+  let products = canUseFirestore()
+    ? await listDocs<Record<string, unknown>>(COLLECTION)
+    : readCollection<Record<string, unknown>[]>("products");
+
+  if (products.length === 0) {
+    products = readCollection<Record<string, unknown>[]>("products");
+  }
+
+  return products
+    .map((product) =>
+      normalizeProduct(
+        typeof product.id === "string" && product.id ? product.id : createId("prod"),
+        product,
+      ),
     )
     .sort(
-    (left, right) => (right.createdAt ?? "").localeCompare(left.createdAt ?? ""),
-  );
+      (left, right) => (right.createdAt ?? "").localeCompare(left.createdAt ?? ""),
+    );
 }
 
 export async function getProducts(filters: ProductFilterInput = {}) {
@@ -112,12 +117,15 @@ export async function getProductById(id: string) {
     return null;
   }
 
-  const snapshot = await getDoc(doc(getFirebaseDb(), COLLECTION, id));
-  if (snapshot.exists()) {
-    return normalizeProduct(snapshot.id, snapshot.data() as Record<string, unknown>);
+  const firestoreProduct = canUseFirestore()
+    ? await getDocById<Record<string, unknown>>(COLLECTION, id)
+    : null;
+  if (firestoreProduct) {
+    return normalizeProduct(id, firestoreProduct);
   }
 
-  return null;
+  const localProduct = readCollection<Record<string, unknown>[]>("products").find((product) => product.id === id);
+  return localProduct ? normalizeProduct(id, localProduct) : null;
 }
 
 export async function getProductCategories() {
@@ -137,7 +145,13 @@ export async function addProduct(input: ProductFormInput) {
     updatedAt: now,
   };
 
-  await setDoc(doc(getFirebaseDb(), COLLECTION, product.id), product);
+  const products = readCollection<Product[]>("products");
+  writeCollection("products", [product, ...products]);
+
+  if (canUseFirestore()) {
+    await setDocById(COLLECTION, product);
+  }
+
   return product;
 }
 
@@ -155,16 +169,15 @@ export async function updateProduct(productId: string, input: ProductFormInput) 
     updatedAt,
   };
 
-  await updateDoc(doc(getFirebaseDb(), COLLECTION, productId), {
-    name: updatedProduct.name,
-    category: updatedProduct.category,
-    description: updatedProduct.description,
-    price: updatedProduct.price,
-    stock: updatedProduct.stock,
-    image64: updatedProduct.image64 ?? "",
-    isActive: updatedProduct.isActive,
-    updatedAt,
-  });
+  const products = await getAllProducts();
+  writeCollection(
+    "products",
+    products.map((product) => (product.id === productId ? updatedProduct : product)),
+  );
+
+  if (canUseFirestore()) {
+    await setDocById(COLLECTION, updatedProduct);
+  }
 
   return updatedProduct;
 }
@@ -175,7 +188,19 @@ export async function deleteProduct(productId: string) {
     throw new Error("Product not found.");
   }
 
-  await deleteDoc(doc(getFirebaseDb(), COLLECTION, productId));
+  writeCollection(
+    "products",
+    readCollection<Product[]>("products").filter((product) => product.id !== productId),
+  );
+
+  if (canUseFirestore()) {
+    try {
+      await deleteDoc(doc(getFirebaseDb(), COLLECTION, productId));
+    } catch (error) {
+      console.warn(`Firestore delete failed for ${COLLECTION}/${productId}`, error);
+    }
+  }
+
   return existingProduct;
 }
 
@@ -232,11 +257,26 @@ export async function updateProductReviewSummary(productId: string) {
   const averageRating =
     reviewCount === 0 ? 0 : Math.round((ratings.reduce((sum, rating) => sum + rating, 0) / reviewCount) * 10) / 10;
 
-  await updateDoc(doc(getFirebaseDb(), COLLECTION, productId), {
+  const existingProduct = await getProductById(productId);
+  if (!existingProduct) {
+    throw new Error("Product not found.");
+  }
+
+  const updatedProduct: Product = {
+    ...existingProduct,
     averageRating,
     reviewCount,
     updatedAt: new Date().toISOString(),
-  });
+  };
+
+  writeCollection(
+    "products",
+    readCollection<Product[]>("products").map((product) => (product.id === productId ? updatedProduct : product)),
+  );
+
+  if (canUseFirestore()) {
+    await setDocById(COLLECTION, updatedProduct);
+  }
 
   return { averageRating, reviewCount };
 }

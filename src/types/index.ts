@@ -4,8 +4,12 @@ export type RdcId = "north" | "south" | "east" | "west" | "central";
 
 export type OrderStatus =
   | "pending"
+  | "placed"
+  | "awaiting_confirmation"
   | "approved"
+  | "packed"
   | "processing"
+  | "shipped"
   | "out_for_delivery"
   | "delivered"
   | "cancelled";
@@ -111,6 +115,11 @@ export interface Order {
   rdcId: RdcId;
   paymentStatus?: PaymentStatus;
   createdAt: string;
+  cancelledAt?: string;
+  cancelledBy?: string;
+  cancelReason?: string;
+  inventoryReducedAt?: string;
+  inventoryRestoredAt?: string;
   updatedAt?: string;
 }
 
@@ -126,6 +135,7 @@ export interface Delivery {
   id: string;
   orderId: string;
   customerId?: string;
+  rdcId?: RdcId;
   driverId: string;
   status: DeliveryStatus;
   customerLocation?: GeoPointLike;
