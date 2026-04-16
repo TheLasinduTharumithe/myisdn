@@ -2,8 +2,11 @@ import type { Metadata } from "next";
 import "@/app/globals.css";
 import AppProviders from "@/components/AppProviders";
 
+const siteUrl = "https://myisdn.vercel.app";
+const shareImagePath = "/og-image-whatsapp.jpg";
+
 export const metadata: Metadata = {
-  metadataBase: new URL("https://myisdn.vercel.app"),
+  metadataBase: new URL(siteUrl),
 
   title: "ISDN | IslandLink Sales Distribution Network",
   description:
@@ -18,14 +21,15 @@ export const metadata: Metadata = {
   openGraph: {
     title: "ISDN | IslandLink Sales Distribution Network",
     description: "Smart Distribution, Real-Time Tracking, Seamless Orders",
-    url: "https://myisdn.vercel.app",
+    url: siteUrl,
     siteName: "ISDN",
     images: [
       {
-        url: "/og-image.png", // must be inside /public
+        url: shareImagePath,
         width: 1200,
         height: 630,
         alt: "ISDN Preview",
+        type: "image/jpeg",
       },
     ],
     type: "website",
@@ -36,7 +40,11 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "ISDN | IslandLink",
     description: "Smart Distribution, Real-Time Tracking, Seamless Orders",
-    images: ["/og-image.png"],
+    images: [shareImagePath],
+  },
+
+  other: {
+    "og:image:secure_url": `${siteUrl}${shareImagePath}`,
   },
 };
 
